@@ -1,0 +1,8 @@
+pandas>=1.3
+langgraph
+graphviz
+python-dotenv
+
+# Optional (for local LLM-based descriptions)
+# transformers
+# torch

@@ -1,0 +1,16 @@
+// ERD
+digraph {
+	customers [label="{customers|customer_id\lname\lemail\lcreated_date\l}" shape=record]
+	orders [label="{orders|order_id\lcustomer_id\lorder_date\ltotal_amount\l}" shape=record]
+	order_items [label="{order_items|order_item_id\lorder_id\lproduct_id\lquantity\lunit_price\l}" shape=record]
+	products [label="{products|product_id\lproduct_name\lcategory\lprice\l}" shape=record]
+	fact_sales [label="{fact_sales|sale_id\lorder_id\lcustomer_id\lamount\l}" shape=record]
+	dim_customer [label="{dim_customer|customer_id\lname\l}" shape=record]
+	dim_product [label="{dim_product|product_id\lproduct_name\l}" shape=record]
+	customers -> orders [label="customer_id -> customer_id"]
+	orders -> order_items [label="order_id -> order_id"]
+	customers -> order_items [label="customer_id -> product_id"]
+	customers -> order_items [label="customer_id -> quantity"]
+	orders -> fact_sales [label="order_id -> order_id"]
+	customers -> fact_sales [label="customer_id -> customer_id"]
+}

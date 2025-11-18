@@ -1,0 +1,13 @@
+{
+  "fact_sales": [
+    {"sale_id": 1, "order_id": 1001, "customer_id": 1, "amount": 29.97},
+    {"sale_id": 2, "order_id": 1002, "customer_id": 2, "amount": 12.50}
+  ],
+  "dim_customer": [
+    {"customer_id": 1, "name": "Alice"},
+    {"customer_id": 2, "name": "Bob"}
+  ],
+  "dim_product": [
+    {"product_id": 1, "product_name": "Widget A"}
+  ]
+}

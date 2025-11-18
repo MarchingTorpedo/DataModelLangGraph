@@ -1,0 +1,19 @@
+{
+  "fact": "customers",
+  "dimensions": [
+    "orders",
+    "order_items",
+    "products",
+    "fact_sales",
+    "dim_customer",
+    "dim_product"
+  ],
+  "joins": {
+    "orders.customer_id": "customers.customer_id",
+    "order_items.order_id": "orders.order_id",
+    "order_items.product_id": "customers.customer_id",
+    "order_items.quantity": "customers.customer_id",
+    "fact_sales.order_id": "orders.order_id",
+    "fact_sales.customer_id": "customers.customer_id"
+  }
+}
