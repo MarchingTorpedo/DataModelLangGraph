@@ -14,6 +14,8 @@ def main():
     parser.add_argument('--catalog', help='Output catalog JSON path', default='catalog.json')
     parser.add_argument('--star', help='Output star schema JSON path', default=None)
     parser.add_argument('--langgraph', help='Output LangGraph JSON path', default=None)
+    parser.add_argument('--materialize-silver', help='Materialize silver layer CSVs', action='store_true')
+    parser.add_argument('--materialize-gold', help='Materialize gold layer CSVs', action='store_true')
     args = parser.parse_args()
 
     tables = load_input(args.input)
@@ -45,6 +47,17 @@ def main():
         lg_model = build_langgraph_model(tables, analysis)
         save_langgraph_model_json(lg_model, args.langgraph)
         print('LangGraph JSON saved to', args.langgraph)
+
+    # materialize silver/gold
+    if args.materialize_silver:
+        from .layers import materialize_silver
+        materialize_silver(tables, analysis, out_dir='silver')
+        print('Silver layer materialized in ./silver')
+
+    if args.materialize_gold:
+        from .layers import materialize_gold
+        materialize_gold(tables, analysis, out_dir='gold')
+        print('Gold layer materialized in ./gold')
 
     print('Done. SQL saved to', args.out)
     print('Catalog saved to', args.catalog)
