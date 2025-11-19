@@ -101,9 +101,10 @@ def materialize_silver(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir:
         out_path = os.path.join(out_dir, f'{t}.csv')
         df2.to_csv(out_path, index=False)
 
-    # generate SQL schema for silver layer
+    # generate SQL schema for silver layer (only include tables present in silver)
     try:
-        sql_text = generate_create_statements(tables, analysis)
+        silver_tables = [os.path.splitext(f)[0] for f in os.listdir(out_dir) if f.endswith('.csv')]
+        sql_text = generate_create_statements(tables, analysis, table_names=silver_tables, drop_if_exists=True, if_not_exists=True)
         save_sql(sql_text, os.path.join(out_dir, 'schema.sql'))
     except Exception:
         pass
@@ -151,9 +152,13 @@ def materialize_gold(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir: s
         else:
             merged.to_csv(os.path.join(out_dir, 'fact_sales_raw.csv'), index=False)
 
-    # generate SQL schema for gold layer
+    # generate SQL schema for gold layer (only dims/facts we created)
     try:
-        sql_text = generate_create_statements(tables, analysis)
+        gold_tables = []
+        for fname in os.listdir(out_dir):
+            if fname.endswith('.csv'):
+                gold_tables.append(os.path.splitext(fname)[0])
+        sql_text = generate_create_statements(tables, analysis, table_names=gold_tables, drop_if_exists=True, if_not_exists=True)
         save_sql(sql_text, os.path.join(out_dir, 'schema.sql'))
     except Exception:
         pass

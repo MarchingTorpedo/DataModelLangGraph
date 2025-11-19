@@ -12,14 +12,28 @@ SQL_TYPE_MAP = {
 def pandas_type_to_sql(dtype: str) -> str:
     return SQL_TYPE_MAP.get(dtype, 'TEXT')
 
-def generate_create_statements(tables: Dict[str, pd.DataFrame], analysis: Dict) -> str:
+def generate_create_statements(tables: Dict[str, pd.DataFrame], analysis: Dict, table_names: list | None = None, drop_if_exists: bool = False, if_not_exists: bool = False) -> str:
+    """Generate CREATE TABLE statements for given tables.
+
+    Parameters:
+    - tables: mapping of table_name -> DataFrame
+    - analysis: analyzer output with pks/fks/types/descriptions
+    - table_names: optional list of table names to include (defaults to all)
+    - drop_if_exists: if True, prepend DROP TABLE IF EXISTS for each table
+    - if_not_exists: if True, emit CREATE TABLE IF NOT EXISTS
+    """
     pks = analysis.get('pks', {})
     fks = analysis.get('fks', {})
     types = analysis.get('types', {})
     descriptions = analysis.get('descriptions', {})
 
-    stmts = []
-    for t, df in tables.items():
+    selected = table_names if table_names is not None else list(tables.keys())
+
+    stmts: list[str] = []
+    for t in selected:
+        if t not in tables:
+            continue
+        df = tables[t]
         cols = []
         for col in df.columns:
             dtype = types.get(t, {}).get(col, 'TEXT')
@@ -27,18 +41,23 @@ def generate_create_statements(tables: Dict[str, pd.DataFrame], analysis: Dict) 
             col_def = f'    "{col}" {sql_type}'
             if pks.get(t) == col:
                 col_def += ' PRIMARY KEY'
-            if descriptions.get(t, {}).get(col):
-                # attach as comment where supported
-                pass
             cols.append(col_def)
-        # add FK constraints
-        table_stmt = f'CREATE TABLE "{t}" (\n' + ',\n'.join(cols) + '\n);'
+
+        create_kw = 'CREATE TABLE'
+        if if_not_exists:
+            create_kw = 'CREATE TABLE IF NOT EXISTS'
+
+        table_stmt = f'{create_kw} "{t}" (\n' + ',\n'.join(cols) + '\n);'
+
+        if drop_if_exists:
+            stmts.append(f'DROP TABLE IF EXISTS "{t}";')
         stmts.append(table_stmt)
 
-    # separate ALTER TABLE ADD CONSTRAINT statements for FKs
+    # separate ALTER TABLE ADD CONSTRAINT statements for FKs (only include if both tables present)
     for (tbl, col), (ref_tbl, ref_col) in fks.items():
-        fk_stmt = f'ALTER TABLE "{tbl}" ADD FOREIGN KEY ("{col}") REFERENCES "{ref_tbl}" ("{ref_col}");'
-        stmts.append(fk_stmt)
+        if tbl in selected and ref_tbl in selected:
+            fk_stmt = f'ALTER TABLE "{tbl}" ADD FOREIGN KEY ("{col}") REFERENCES "{ref_tbl}" ("{ref_col}");'
+            stmts.append(fk_stmt)
 
     return '\n\n'.join(stmts)
 
