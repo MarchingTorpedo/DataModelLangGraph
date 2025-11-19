@@ -12,7 +12,7 @@ SQL_TYPE_MAP = {
 def pandas_type_to_sql(dtype: str) -> str:
     return SQL_TYPE_MAP.get(dtype, 'TEXT')
 
-def generate_create_statements(tables: Dict[str, pd.DataFrame], analysis: Dict, table_names: list | None = None, drop_if_exists: bool = False, if_not_exists: bool = False) -> str:
+def generate_create_statements(tables: Dict[str, pd.DataFrame], analysis: Dict, table_names: list | None = None, drop_if_exists: bool = False, if_not_exists: bool = False, ref_layer_prefix: str | None = None) -> str:
     """Generate CREATE TABLE statements for given tables.
 
     Parameters:
@@ -55,9 +55,23 @@ def generate_create_statements(tables: Dict[str, pd.DataFrame], analysis: Dict, 
 
     # separate ALTER TABLE ADD CONSTRAINT statements for FKs (only include if both tables present)
     for (tbl, col), (ref_tbl, ref_col) in fks.items():
-        if tbl in selected and ref_tbl in selected:
-            fk_stmt = f'ALTER TABLE "{tbl}" ADD FOREIGN KEY ("{col}") REFERENCES "{ref_tbl}" ("{ref_col}");'
-            stmts.append(fk_stmt)
+        # Only emit FK for tables we are creating in this statement (tbl in selected)
+        if tbl not in selected:
+            continue
+        # Determine how to reference the referenced table: if ref_tbl is included in this
+        # selected set, reference it directly. Otherwise, if a ref_layer_prefix is provided,
+        # prefix the referenced table name with it (e.g., 'bronze.customers' or 'silver.orders').
+        if ref_tbl in selected:
+            ref_name = f'"{ref_tbl}"'
+        elif ref_layer_prefix:
+            # allow dot-qualified identifier, do not quote the dot
+            ref_name = f'{ref_layer_prefix}."{ref_tbl}"'
+        else:
+            # skip FK if referenced table not present and no prefix provided
+            continue
+
+        fk_stmt = f'ALTER TABLE "{tbl}" ADD FOREIGN KEY ("{col}") REFERENCES {ref_name} ("{ref_col}");'
+        stmts.append(fk_stmt)
 
     return '\n\n'.join(stmts)
 

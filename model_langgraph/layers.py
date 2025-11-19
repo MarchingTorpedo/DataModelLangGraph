@@ -108,7 +108,8 @@ def materialize_silver(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir:
         metrics = compute_metrics(tables)
         col_class = classify_columns(tables, analysis, metrics=metrics)
         silver_tables = [t for t, cols in col_class.items() if any(c['layer'] == 'silver' for c in cols.values())]
-        sql_text = generate_create_statements(tables, analysis, table_names=silver_tables, drop_if_exists=True, if_not_exists=True)
+        # silver should reference bronze layer for FKs (if bronze tables exist)
+        sql_text = generate_create_statements(tables, analysis, table_names=silver_tables, drop_if_exists=True, if_not_exists=True, ref_layer_prefix='bronze')
         save_sql(sql_text, os.path.join(out_dir, 'schema.sql'))
     except Exception:
         pass
@@ -171,7 +172,8 @@ def materialize_gold(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir: s
             if extra in gold_artifacts and extra not in gold_tables:
                 gold_tables.append(extra)
 
-        sql_text = generate_create_statements(tables, analysis, table_names=gold_tables, drop_if_exists=True, if_not_exists=True)
+        # gold should reference silver layer for FKs
+        sql_text = generate_create_statements(tables, analysis, table_names=gold_tables, drop_if_exists=True, if_not_exists=True, ref_layer_prefix='silver')
         save_sql(sql_text, os.path.join(out_dir, 'schema.sql'))
     except Exception:
         pass
