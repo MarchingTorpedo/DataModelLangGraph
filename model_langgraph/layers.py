@@ -2,6 +2,8 @@ import os
 from typing import Dict, Any
 import pandas as pd
 
+from .sql_generator import generate_create_statements, save_sql
+
 def compute_metrics(tables: Dict[str, pd.DataFrame]):
     metrics = {}
     for t, df in tables.items():
@@ -99,6 +101,13 @@ def materialize_silver(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir:
         out_path = os.path.join(out_dir, f'{t}.csv')
         df2.to_csv(out_path, index=False)
 
+    # generate SQL schema for silver layer
+    try:
+        sql_text = generate_create_statements(tables, analysis)
+        save_sql(sql_text, os.path.join(out_dir, 'schema.sql'))
+    except Exception:
+        pass
+
 
 def materialize_gold(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir: str = 'gold'):
     """Create simple gold artifacts (facts and dims) for the sample dataset.
@@ -141,3 +150,10 @@ def materialize_gold(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir: s
             fact.to_csv(os.path.join(out_dir, 'fact_sales.csv'), index=False)
         else:
             merged.to_csv(os.path.join(out_dir, 'fact_sales_raw.csv'), index=False)
+
+    # generate SQL schema for gold layer
+    try:
+        sql_text = generate_create_statements(tables, analysis)
+        save_sql(sql_text, os.path.join(out_dir, 'schema.sql'))
+    except Exception:
+        pass
