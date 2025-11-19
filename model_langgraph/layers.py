@@ -73,12 +73,15 @@ def materialize_silver(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir:
     """
     _ensure_dir(out_dir)
     pks = analysis.get('pks', {})
+    # Previously this function wrote cleaned CSVs to disk. Per request, we no longer
+    # emit CSV files for the silver layer. Instead we perform light cleaning in-memory
+    # (coercions, date parsing, trimming) so we can still compute schema information.
+    cleaned_tables: Dict[str, pd.DataFrame] = {}
     for t, df in tables.items():
         df2 = df.copy()
         for col in df2.columns:
             # try numeric coercion
             if df2[col].dtype == object:
-                # numbers
                 try:
                     df2[col] = pd.to_numeric(df2[col], errors='ignore')
                 except Exception:
@@ -93,17 +96,18 @@ def materialize_silver(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir:
             if df2[col].dtype == object:
                 df2[col] = df2[col].astype(str).str.strip()
 
-        # dedupe on PK
+        # dedupe on PK (in-memory only)
         pk = pks.get(t)
         if pk and pk in df2.columns:
             df2 = df2.drop_duplicates(subset=[pk])
 
-        out_path = os.path.join(out_dir, f'{t}.csv')
-        df2.to_csv(out_path, index=False)
+        cleaned_tables[t] = df2
 
-    # generate SQL schema for silver layer (only include tables present in silver)
+    # generate SQL schema for silver layer (determine silver tables by classification)
     try:
-        silver_tables = [os.path.splitext(f)[0] for f in os.listdir(out_dir) if f.endswith('.csv')]
+        metrics = compute_metrics(tables)
+        col_class = classify_columns(tables, analysis, metrics=metrics)
+        silver_tables = [t for t, cols in col_class.items() if any(c['layer'] == 'silver' for c in cols.values())]
         sql_text = generate_create_statements(tables, analysis, table_names=silver_tables, drop_if_exists=True, if_not_exists=True)
         save_sql(sql_text, os.path.join(out_dir, 'schema.sql'))
     except Exception:
@@ -118,19 +122,23 @@ def materialize_gold(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir: s
     """
     _ensure_dir(out_dir)
     # write dims
+    # Previously this function wrote dim/fact CSVs. Per request, we will compute
+    # them in-memory but not persist CSV files. We still generate the gold schema
+    # SQL based on classification below.
+    gold_artifacts: Dict[str, pd.DataFrame] = {}
     if 'customers' in tables:
         cust = tables['customers'].copy()
         if 'customer_id' in cust.columns:
             cust = cust.drop_duplicates(subset=['customer_id'])
-        cust.to_csv(os.path.join(out_dir, 'dim_customer.csv'), index=False)
+        gold_artifacts['dim_customer'] = cust
 
     if 'products' in tables:
         prod = tables['products'].copy()
         if 'product_id' in prod.columns:
             prod = prod.drop_duplicates(subset=['product_id'])
-        prod.to_csv(os.path.join(out_dir, 'dim_product.csv'), index=False)
+        gold_artifacts['dim_product'] = prod
 
-    # build fact_sales if possible
+    # build fact_sales in-memory if possible
     if 'order_items' in tables and 'orders' in tables:
         oi = tables['order_items'].copy()
         ords = tables['orders'].copy()
@@ -145,19 +153,24 @@ def materialize_gold(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir: s
             except Exception:
                 merged['line_amount'] = None
 
-        # aggregate to fact level (order_id, customer_id)
+        # aggregate to fact level (order_id)
         if 'order_id' in merged.columns:
             fact = merged.groupby(['order_id']).agg({'line_amount': 'sum'}).reset_index()
-            fact.to_csv(os.path.join(out_dir, 'fact_sales.csv'), index=False)
+            gold_artifacts['fact_sales'] = fact
         else:
-            merged.to_csv(os.path.join(out_dir, 'fact_sales_raw.csv'), index=False)
+            gold_artifacts['fact_sales_raw'] = merged
 
     # generate SQL schema for gold layer (only dims/facts we created)
+    # generate SQL schema for gold layer (determine gold tables by classification)
     try:
-        gold_tables = []
-        for fname in os.listdir(out_dir):
-            if fname.endswith('.csv'):
-                gold_tables.append(os.path.splitext(fname)[0])
+        metrics = compute_metrics(tables)
+        col_class = classify_columns(tables, analysis, metrics=metrics)
+        gold_tables = [t for t, cols in col_class.items() if any(c['layer'] == 'gold' for c in cols.values())]
+        # also include common gold artifact names if they exist in analysis/tables
+        for extra in ['fact_sales', 'dim_customer', 'dim_product']:
+            if extra in gold_artifacts and extra not in gold_tables:
+                gold_tables.append(extra)
+
         sql_text = generate_create_statements(tables, analysis, table_names=gold_tables, drop_if_exists=True, if_not_exists=True)
         save_sql(sql_text, os.path.join(out_dir, 'schema.sql'))
     except Exception:
