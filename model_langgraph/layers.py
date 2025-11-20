@@ -64,13 +64,32 @@ def _ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 
-def materialize_silver(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir: str = 'silver'):
+def materialize_silver(
+    tables: Dict[str, pd.DataFrame],
+    analysis: Dict,
+    out_dir: str = 'silver',
+    layer_schema_map: Dict[str, str] | None = None,
+) -> None:
     """Create basic cleaned/conformed CSVs under `out_dir`.
 
     - Coerces numeric types
     - Parses dates
     - Deduplicates on PK if available
     """
+    # Now only generate SQL schema that references bronze. Use provided layer->schema mapping.
+    os.makedirs(out_dir, exist_ok=True)
+    classified = classify_columns(tables, analysis)
+    # Build cleaned tables in-memory (select silver-appropriate columns)
+    cleaned = {}
+    for t, df in tables.items():
+        cols = [c for c, meta in classified.get(t, {}).items() if meta['layer'] == 'silver']
+        if not cols:
+            continue
+        cleaned[t] = df[cols].copy()
+    # Default mapping if none provided
+    if layer_schema_map is None:
+        layer_schema_map = {'bronze': 'bronze', 'silver': 'silver', 'gold': 'gold'}
+    schema_name = layer_schema_map.get('silver')
     _ensure_dir(out_dir)
     pks = analysis.get('pks', {})
     # Previously this function wrote cleaned CSVs to disk. Per request, we no longer
@@ -103,25 +122,88 @@ def materialize_silver(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir:
 
         cleaned_tables[t] = df2
 
-    # generate SQL schema for silver layer (determine silver tables by classification)
+    # generate SQL schema for silver layer using the filtered cleaned frames
     try:
-        metrics = compute_metrics(tables)
-        col_class = classify_columns(tables, analysis, metrics=metrics)
-        silver_tables = [t for t, cols in col_class.items() if any(c['layer'] == 'silver' for c in cols.values())]
-        # silver should reference bronze layer for FKs (if bronze tables exist)
-        sql_text = generate_create_statements(tables, analysis, table_names=silver_tables, drop_if_exists=True, if_not_exists=True, ref_layer_prefix='bronze')
+        if not cleaned:
+            return
+        sql_text = generate_create_statements(
+            cleaned,
+            analysis,
+            table_names=list(cleaned.keys()),
+            drop_if_exists=True,
+            if_not_exists=True,
+            schema_name=schema_name,
+            ref_layer_name='bronze',
+            layer_schema_map=layer_schema_map,
+        )
         save_sql(sql_text, os.path.join(out_dir, 'schema.sql'))
     except Exception:
         pass
 
 
-def materialize_gold(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir: str = 'gold'):
+def materialize_bronze(
+    tables: Dict[str, pd.DataFrame],
+    analysis: Dict,
+    out_dir: str = 'bronze',
+    layer_schema_map: Dict[str, str] | None = None,
+) -> None:
+    """Materialize the bronze layer: raw tables, all columns, schema-qualified DDL only."""
+    os.makedirs(out_dir, exist_ok=True)
+    # All columns, raw tables
+    bronze_tables = {t: df.copy() for t, df in tables.items()}
+    # Default mapping if none provided
+    if layer_schema_map is None:
+        layer_schema_map = {'bronze': 'bronze', 'silver': 'silver', 'gold': 'gold'}
+    schema_name = layer_schema_map.get('bronze', 'bronze')
+    try:
+        if not bronze_tables:
+            return
+        sql_text = generate_create_statements(
+            bronze_tables,
+            analysis,
+            table_names=list(bronze_tables.keys()),
+            drop_if_exists=True,
+            if_not_exists=True,
+            schema_name=schema_name,
+            ref_layer_name=None,
+            layer_schema_map=layer_schema_map,
+        )
+        save_sql(sql_text, os.path.join(out_dir, 'schema.sql'))
+    except Exception:
+        pass
+
+def materialize_gold(
+    tables: Dict[str, pd.DataFrame],
+    analysis: Dict,
+    out_dir: str = 'gold',
+    layer_schema_map: Dict[str, str] | None = None,
+) -> None:
     """Create simple gold artifacts (facts and dims) for the sample dataset.
 
     This implements a small example: builds `fact_sales` by joining `order_items` + `orders` + `products`.
     Also writes `dim_customer` and `dim_product` if present.
     """
+    # Now compute artifacts and only generate SQL. Use provided layer->schema mapping.
+    os.makedirs(out_dir, exist_ok=True)
+    classified = classify_columns(tables, analysis)
+    # Heuristic: largest table -> fact, others dims
+    sizes = {t: len(df) for t, df in tables.items()}
+    fact_table = max(sizes, key=lambda k: sizes[k])
+    dim_tables = [t for t in tables.keys() if t != fact_table]
+    # Build gold tables (dim_/fact_ prefixes) selecting gold-classified columns
+    gold_tables = {}
+    fact_cols = [c for c, meta in classified.get(fact_table, {}).items() if meta['layer'] == 'gold']
+    if fact_cols:
+        gold_tables[f'fact_{fact_table}'] = tables[fact_table][fact_cols].copy()
+    for dt in dim_tables:
+        cols = [c for c, meta in classified.get(dt, {}).items() if meta['layer'] == 'gold']
+        if cols:
+            gold_tables[f'dim_{dt}'] = tables[dt][cols].copy()
     _ensure_dir(out_dir)
+    # Default mapping if none provided
+    if layer_schema_map is None:
+        layer_schema_map = {'bronze': 'bronze', 'silver': 'silver', 'gold': 'gold'}
+    schema_name = layer_schema_map.get('gold')
     # write dims
     # Previously this function wrote dim/fact CSVs. Per request, we will compute
     # them in-memory but not persist CSV files. We still generate the gold schema
@@ -161,19 +243,23 @@ def materialize_gold(tables: Dict[str, pd.DataFrame], analysis: Dict, out_dir: s
         else:
             gold_artifacts['fact_sales_raw'] = merged
 
-    # generate SQL schema for gold layer (only dims/facts we created)
-    # generate SQL schema for gold layer (determine gold tables by classification)
+    # generate SQL schema for gold layer (combine computed gold frames and artifacts)
     try:
-        metrics = compute_metrics(tables)
-        col_class = classify_columns(tables, analysis, metrics=metrics)
-        gold_tables = [t for t, cols in col_class.items() if any(c['layer'] == 'gold' for c in cols.values())]
-        # also include common gold artifact names if they exist in analysis/tables
-        for extra in ['fact_sales', 'dim_customer', 'dim_product']:
-            if extra in gold_artifacts and extra not in gold_tables:
-                gold_tables.append(extra)
-
-        # gold should reference silver layer for FKs
-        sql_text = generate_create_statements(tables, analysis, table_names=gold_tables, drop_if_exists=True, if_not_exists=True, ref_layer_prefix='silver')
+        final_gold_frames: Dict[str, pd.DataFrame] = {}
+        final_gold_frames.update(gold_tables or {})
+        final_gold_frames.update(gold_artifacts or {})
+        if not final_gold_frames:
+            return
+        sql_text = generate_create_statements(
+            final_gold_frames,
+            analysis,
+            table_names=list(final_gold_frames.keys()),
+            drop_if_exists=True,
+            if_not_exists=True,
+            schema_name=schema_name,
+            ref_layer_name='silver',
+            layer_schema_map=layer_schema_map,
+        )
         save_sql(sql_text, os.path.join(out_dir, 'schema.sql'))
     except Exception:
         pass

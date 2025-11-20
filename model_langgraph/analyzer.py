@@ -40,14 +40,15 @@ def detect_primary_keys(tables: Dict[str, pd.DataFrame]) -> Dict[str, str]:
             pks[name] = None
     return pks
 
-def detect_foreign_keys(tables: Dict[str, pd.DataFrame], pks: Dict[str, str]) -> Dict[Tuple[str, str], Tuple[str, str]]:
+def detect_foreign_keys(tables: Dict[str, pd.DataFrame], pks: Dict[str, str], min_overlap: float = 0.7) -> Dict[Tuple[str, str], Tuple[str, str]]:
     # returns mapping ((table, col) -> (ref_table, ref_col))
     fks = {}
     # build value -> table map for PKs
     pk_values = {}
     for t, pk in pks.items():
         if pk and pk in tables[t].columns:
-            pk_values[t] = set(tables[t][pk].dropna().unique())
+            vals = tables[t][pk].dropna().unique()
+            pk_values[t] = set(vals)
 
     for t, df in tables.items():
         for col in df.columns:
@@ -57,13 +58,50 @@ def detect_foreign_keys(tables: Dict[str, pd.DataFrame], pks: Dict[str, str]) ->
             vals = set(df[col].dropna().unique())
             if not vals:
                 continue
+            # infer types for additional check
+            try:
+                col_type = infer_column_type(df[col])
+            except Exception:
+                col_type = None
+
             for ref_table, ref_vals in pk_values.items():
                 if ref_table == t:
                     continue
-                # heuristic: if >50% of non-null values appear in ref pk values
+                ref_pk = pks.get(ref_table)
+                if not ref_pk:
+                    continue
+                # heuristic: if >min_overlap of non-null unique values appear in ref pk values
                 common = vals.intersection(ref_vals)
-                if len(common) / max(1, len(vals)) > 0.5:
-                    fks[(t, col)] = (ref_table, pks[ref_table])
+                if not common:
+                    continue
+                overlap = len(common) / max(1, len(vals))
+
+                # basic type check: require same inferred type or both numeric
+                try:
+                    ref_series = tables[ref_table][ref_pk]
+                    ref_type = infer_column_type(ref_series)
+                except Exception:
+                    ref_type = None
+
+                numeric_types = {'INTEGER', 'FLOAT'}
+                types_compatible = False
+                if col_type and ref_type:
+                    if col_type == ref_type:
+                        types_compatible = True
+                    elif col_type in numeric_types and ref_type in numeric_types:
+                        types_compatible = True
+
+                # lower threshold if column name looks like a foreign key
+                threshold = min_overlap
+                low_col = col.lower()
+                if low_col.endswith('_id') or ref_table.lower() in low_col or low_col == ref_pk.lower():
+                    threshold = 0.5
+
+                # require at least a minimal number of common values to avoid single-match noise
+                min_common = max(2, int(0.05 * len(vals)))
+
+                if overlap >= threshold and len(common) >= min_common and types_compatible:
+                    fks[(t, col)] = (ref_table, ref_pk)
                     break
     return fks
 

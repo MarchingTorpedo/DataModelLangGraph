@@ -12,7 +12,17 @@ SQL_TYPE_MAP = {
 def pandas_type_to_sql(dtype: str) -> str:
     return SQL_TYPE_MAP.get(dtype, 'TEXT')
 
-def generate_create_statements(tables: Dict[str, pd.DataFrame], analysis: Dict, table_names: list | None = None, drop_if_exists: bool = False, if_not_exists: bool = False, ref_layer_prefix: str | None = None) -> str:
+def generate_create_statements(
+    tables: Dict[str, pd.DataFrame],
+    analysis: Dict,
+    table_names: list | None = None,
+    drop_if_exists: bool = False,
+    if_not_exists: bool = False,
+    schema_name: str | None = None,
+    ref_layer_name: str | None = None,
+    layer_schema_map: Dict[str, str] | None = None,
+    table_schema_map: Dict[str, str] | None = None,
+) -> str:
     """Generate CREATE TABLE statements for given tables.
 
     Parameters:
@@ -30,6 +40,17 @@ def generate_create_statements(tables: Dict[str, pd.DataFrame], analysis: Dict, 
     selected = table_names if table_names is not None else list(tables.keys())
 
     stmts: list[str] = []
+    # If a schema_name is provided, emit a CREATE SCHEMA header once
+    if schema_name:
+        stmts.append(f'CREATE SCHEMA IF NOT EXISTS {schema_name};')
+    def qname(name: str, schema: str | None = None) -> str:
+        # allow per-table schema override via table_schema_map
+        if table_schema_map and name in table_schema_map:
+            schema = table_schema_map[name]
+        if schema:
+            return f'{schema}."{name}"'
+        return f'"{name}"'
+
     for t in selected:
         if t not in tables:
             continue
@@ -47,10 +68,11 @@ def generate_create_statements(tables: Dict[str, pd.DataFrame], analysis: Dict, 
         if if_not_exists:
             create_kw = 'CREATE TABLE IF NOT EXISTS'
 
-        table_stmt = f'{create_kw} "{t}" (\n' + ',\n'.join(cols) + '\n);'
+        table_ident = qname(t, schema_name)
+        table_stmt = f'{create_kw} {table_ident} (\n' + ',\n'.join(cols) + '\n);'
 
         if drop_if_exists:
-            stmts.append(f'DROP TABLE IF EXISTS "{t}";')
+            stmts.append(f'DROP TABLE IF EXISTS {table_ident};')
         stmts.append(table_stmt)
 
     # separate ALTER TABLE ADD CONSTRAINT statements for FKs (only include if both tables present)
@@ -58,19 +80,23 @@ def generate_create_statements(tables: Dict[str, pd.DataFrame], analysis: Dict, 
         # Only emit FK for tables we are creating in this statement (tbl in selected)
         if tbl not in selected:
             continue
-        # Determine how to reference the referenced table: if ref_tbl is included in this
-        # selected set, reference it directly. Otherwise, if a ref_layer_prefix is provided,
-        # prefix the referenced table name with it (e.g., 'bronze.customers' or 'silver.orders').
+
+        # Source table identifier uses per-table mapping or the provided schema_name
+        src_ident = qname(tbl, schema_name)
+
+        # Determine the referenced table identifier: prefer per-table mapping, then selected schema, then layer mapping
         if ref_tbl in selected:
-            ref_name = f'"{ref_tbl}"'
-        elif ref_layer_prefix:
-            # allow dot-qualified identifier, do not quote the dot
-            ref_name = f'{ref_layer_prefix}."{ref_tbl}"'
+            ref_ident = qname(ref_tbl, schema_name)
+        elif table_schema_map and ref_tbl in table_schema_map:
+            ref_ident = qname(ref_tbl, table_schema_map[ref_tbl])
+        elif ref_layer_name and layer_schema_map and ref_layer_name in layer_schema_map:
+            ref_schema = layer_schema_map[ref_layer_name]
+            ref_ident = qname(ref_tbl, ref_schema)
         else:
-            # skip FK if referenced table not present and no prefix provided
+            # skip FK if referenced table not present and no mapping provided
             continue
 
-        fk_stmt = f'ALTER TABLE "{tbl}" ADD FOREIGN KEY ("{col}") REFERENCES {ref_name} ("{ref_col}");'
+        fk_stmt = f'ALTER TABLE {src_ident} ADD FOREIGN KEY ("{col}") REFERENCES {ref_ident} ("{ref_col}");'
         stmts.append(fk_stmt)
 
     return '\n\n'.join(stmts)
